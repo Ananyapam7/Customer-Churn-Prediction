@@ -84,7 +84,7 @@ Dive into a comprehensive analysis and machine learning tasks using R. In this s
   - Dimensionality Reduction
   - Churn Prediction
 
-🔗 [Access the R HTML page](https://link-url-here.org) for detailed code snippets, visualizations, and insights.
+🔗 [Access the R HTML page](https://students.iiserkol.ac.in/~ad18ms075/notebooks/notebook-eda.html) for detailed code snippets, visualizations, and insights.
 
 ---
 
@@ -100,4 +100,4 @@ Venture into the realm of deep learning and transformers using Python. In this s
   - Observations during model training
   - Confusion Matrix Analysis
 
-🔗 [View the Jupyter Notebook](https://link-url-here.org) for a closer look into the methodologies and results.
+🔗 [View the Jupyter Notebook](https://students.iiserkol.ac.in/~ad18ms075/notebooks/notebook-deep-learning.html) for a closer look into the methodologies and results.
