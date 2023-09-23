@@ -2,6 +2,8 @@
 .Rhistory
 .Rapp.history
 
+/models/DL_model
+
 # Session Data files
 .RData
 .RDataTmp
