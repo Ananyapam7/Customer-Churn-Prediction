@@ -1,0 +1,923 @@
+---
+title: "Customer Churn Analysis"
+author: "Ananyapam De"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cerulean
+---
+
+```{r setup, include=FALSE, comment=NA}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, comment = NA) 
+```
+
+## Introduction
+
+This analysis focuses on the churn data for a telecommunication company. By understanding the dataset's structure, patterns, and possible correlations, we aim to derive insights that can  predict customer customer churn behavior and guide future customer retention strategies.
+
+## Setup and Data Loading
+
+```{r, echo=FALSE, warning=FALSE}
+rm(list=ls())
+library(readr)
+library(ggplot2)
+library(scales)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(arules)
+library(factoextra)
+library(cluster)
+library(corrr)
+library(psych)
+library(knitr)
+```
+
+### Loading the Dataset
+
+Let's load the dataset and take a preliminary look at the first few rows of the dataset.
+
+```{r}
+churn <- read.csv("../data/WA_Fn-UseC_-Telco-Customer-Churn.csv")
+DT::datatable(
+  head(churn),
+  options = list(scrollX = TRUE)
+)
+```
+
+### Structure and Summary of the Dataset
+
+Understanding the structure and some basic statistics can give us an overview of the data's nature.
+
+```{r}
+knitr::kable(str(churn))
+knitr::kable(summary(churn))
+```
+
+## Data Variables Explained
+
+Here is a brief explanation of each variable:
+
+- **customerID**: Unique Customer ID.
+- **gender**: Customer gender which can be either female or male.
+- **SeniorCitizen**: Indicates whether the customer is a senior citizen (1 for Yes, 0 for No).
+- **Partner**: Indicates whether the customer has a partner (Yes or No).
+- **Dependents**: Indicates if the customer has any dependents (Yes or No).
+- **tenure**: The number of months the customer has stayed with the company. 
+- **PhoneService**: Whether the customer has a phone service or not (Yes, No).
+- **MultipleLines**: Indicates if the customer has multiple lines (Yes, No, or No phone service).
+- **InternetService**: Describes the customer’s internet service provider (Options: DSL, Fiber optic, No).
+- **OnlineSecurity**: Specifies whether the customer has online security (Yes, No, or No internet service).
+- **OnlineBackup**: Indicates if the customer has an online backup service (Yes, No, or No internet service).
+- **DeviceProtection**: Whether the customer has opted for device protection (Yes, No, or No internet service).
+- **TechSupport**: Specifies if the customer has tech support (Yes, No, or No internet service).
+- **StreamingTV**: Indicates if the customer uses the streaming TV service (Yes, No, or No internet service).
+- **StreamingMovies**: Describes whether the customer uses the streaming movies service (Yes, No, or No internet service).
+- **Contract**: The contract term of the customer, which can be Month-to-month, One year, or Two year.
+- **PaperlessBilling**: Whether the customer uses paperless billing (Yes or No).
+- **PaymentMethod**: The customer’s chosen payment method (Options: Electronic check, Mailed check, Bank transfer (automatic), Credit card (automatic)).
+- **MonthlyCharges**: The amount charged to the customer on a monthly basis.
+- **TotalCharges**: The total amount charged to the customer over time.
+- **Churn**: Specifies if the customer churned or not (Yes or No). Churning implies discontinuing the service.
+
+## Data Imputation
+
+### NA values
+
+We've identified 11 missing values in the `TotalCharges` column. Upon closer examination, these entries correspond to customers with less than one month of tenure. This indicates that charges are recorded only at the end of a billing cycle or month. For customers in their initial month, the logical approach is to replace the missing TotalCharges values with the respective values from the `MonthlyCharges` column. This is based on the understanding that, for these customers, the total charges accrued until that point would equate to their single month's charge.
+
+```{r}
+churn$TotalCharges[is.na(churn$TotalCharges)] <- churn$MonthlyCharges[is.na(churn$TotalCharges)]
+```
+
+### Outlier Detection
+
+```{r}
+par(mfrow=c(1,2))
+boxplot(churn$MonthlyCharges, main="Boxplot - Monthly Charges", col="#99CC99")
+boxplot(churn$TotalCharges, main="Boxplot - Total Charges", col="#9999CC")
+```
+
+Upon visual inspection, there does not seem to appear to be any conspicuous outliers in these columns. For completeness, let us use the Inter-Quartile Range (IQR) as a measure for detecting outliers.
+
+```{r}
+detect_outliers <- function(data, column_name) {
+  # Check if column_name exists in data
+  if(!(column_name %in% names(data))) {
+    stop(paste("The column", column_name, "does not exist in the provided data frame."))
+  }
+  
+  # Extract column values
+  column_values <- data[[column_name]]
+  
+  # Calculate IQR for the column
+  IQR_value <- IQR(column_values)
+  
+  # Calculate lower and upper bounds
+  lower_bound <- quantile(column_values, 0.25) - 1.5 * IQR_value
+  upper_bound <- quantile(column_values, 0.75) + 1.5 * IQR_value
+  
+  # Detect outliers
+  outliers <- column_values[column_values < lower_bound | column_values > upper_bound]
+  return(outliers)
+}
+
+MonthlyChargesOutliers <- detect_outliers(churn, "MonthlyCharges")
+TotalChargesOutliers <- detect_outliers(churn, "TotalCharges")
+
+print(MonthlyChargesOutliers)
+print(TotalChargesOutliers)
+```
+
+Given our current analysis, there are no glaring outliers in the dataset. This is excellent as it simplifies the preprocessing stage and assures us that our subsequent analyses won't be heavily skewed by extreme values.
+
+## Visualize the distributions for the different features
+### Plot Distribution of Tenure
+```{r tenure-plot, message=FALSE, warning=FALSE}
+tenure_plot <- ggplot(churn, aes(x=tenure)) + 
+  geom_histogram(binwidth=5, fill="#66c2a5", color="white", alpha=0.7) +
+  labs(title="Distribution of Tenure", x="Tenure", y="Count") +
+  theme_minimal()
+print(tenure_plot)
+```
+
+**Insight**: A significant number of customers are discontinuing their service within the initial months. The recent peak observed in the last month should be interpreted as customers who are currently active and have not yet terminated their relationship with the telecom provider.
+
+### Plot Distribution of Monthly Charges
+```{r monthly-charges-plot, message=FALSE, warning=FALSE}
+monthlyCharges_plot <- ggplot(churn, aes(x=MonthlyCharges)) + 
+  geom_histogram(binwidth=10, fill="#fc8d62", color="white", alpha=0.7) +
+  labs(title="Distribution of Monthly Charges", x="Monthly Charges", y="Count") +
+  theme_minimal()
+print(monthlyCharges_plot)
+```
+**Insight**: This is a **heavy tailed** distribution resembles the **log-Cauchy probability model** distribution which is generally used in processes where significant outliers or extreme results may occur.
+
+### Plot Distribution of Total Charges
+```{r total-charges-plot, message=FALSE, warning=FALSE}
+totalCharges_plot <- ggplot(churn, aes(x=TotalCharges)) + 
+  geom_histogram(binwidth=100, fill="#8da0cb", color="white", alpha=0.7) +
+  labs(title="Distribution of Total Charges", x="Total Charges", y="Count") +
+  theme_minimal()
+print(totalCharges_plot)
+```
+
+**Insight**: The plot of total charges for the telecom company appears to follow an exponential distribution. In such a distribution:
+
+**Initial Rapid Growth**: At the beginning of the distribution, the total charges are low, indicating that a significant number of customers are likely on lower-cost plans or have just recently subscribed to the service.
+
+**Exponential Decay**: As we move to the right on the plot, the total charges increase exponentially. This suggests that there is a substantial number of customers who have higher-cost plans, additional services, or have been with the company for an extended period. These customers contribute significantly to the company's revenue.
+
+### Plot Distribution of Churn of customers and the tenures
+```{r churn-plot, message=FALSE, warning=FALSE}
+churn_dist_plot <- ggplot(churn, aes(x=Churn)) + 
+  geom_bar(fill="#e78ac3") +
+  labs(title="Churn Distribution", x="Churn", y="Count") +
+  theme_minimal()
+print(churn_dist_plot)
+
+tenure_histogram <- ggplot(subset(churn, Churn == "Yes"), aes(x = tenure)) +
+  geom_histogram(binwidth = 5, fill = "#e78ac3") +  # You can adjust binwidth as needed
+  labs(title = "Tenure Distribution of Churned Customers", x = "Tenure", y = "Count") +
+  theme_minimal()
+
+# Print and save the plot
+print(tenure_histogram)
+```
+
+**Insight**: Around 26% of the customers have discontinued the service.
+
+**Exponential Decay**: The plot shows a rapid initial decline in the number of churned customers as tenure increases. This indicates that a significant proportion of customers tend to churn relatively early in their relationship with the company.
+
+**Long Tail**: As tenure increases, the number of churned customers declines at a slower rate. This *long tail* of the distribution suggests that some customers remain with the company for a more extended period before ultimately churning. 
+
+### Plot Class Counts for every categorical column
+```{r class-counts, message=FALSE, warning=FALSE}
+
+churn <- churn %>%
+  mutate(SeniorCitizen=ifelse(SeniorCitizen==1, "Yes", "No"))
+
+demographic_data <- churn %>%
+  select(gender, SeniorCitizen, Partner, Dependents) %>%
+  gather(key = "Variable", value = "Value")
+
+phone_services_data <- churn %>%
+  select(PhoneService, MultipleLines) %>%
+  gather(key = "Variable", value = "Value")
+
+internet_services_data <- churn %>%
+  select(OnlineSecurity, OnlineBackup, DeviceProtection, TechSupport, StreamingTV, StreamingMovies) %>%
+  gather(key = "Variable", value = "Value")
+
+payment_options_data <- churn %>%
+  select(PaperlessBilling, PaymentMethod) %>%
+  gather(key = "Variable", value = "Value")
+
+# Create a plotting function for consistency
+plot_data <- function(data){
+  ggplot(data, aes(x=Value, fill=Value)) + 
+    geom_bar() + 
+    facet_wrap(~ Variable, scales = "free") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "bottom") +
+    scale_fill_brewer(palette="Set3")  # Using a color palette from RColorBrewer package
+}
+
+# Create the plots
+# Create and print the plots
+demographic_plot <- plot_data(demographic_data)
+print(demographic_plot)
+
+phone_services_plot <- plot_data(phone_services_data)
+print(phone_services_plot)
+
+internet_services_plot <- plot_data(internet_services_data)
+print(internet_services_plot)
+
+payment_options_plot <- plot_data(payment_options_data)
+print(payment_options_plot)
+```
+
+These plots indicate that there is considerable **class-imbalance** in the data. Hence we need to be cautious as we might need to employ techniques like *oversampling, undersampling* or *regularization* to circumvent this issue training using deep learning models.
+
+### Plot of density of Total Charges for Churn vs Non-Churn
+
+```{r tot-charge-churn-non-churn, message=FALSE, warning=FALSE}
+churn_non_churn_tot_charge <- churn %>%
+  ggplot(aes(x = TotalCharges, fill = Churn)) +
+  geom_density(alpha = 0.8) +
+  scale_fill_manual(values = c('red', 'yellow')) +
+  labs(title = 'Total Charges Density Split of Churn vs Non-Churn')
+print(churn_non_churn_tot_charge)
+```
+
+### Calculate and plot Churn Rate by Internet Service
+```{r churn-rate-internet-plot, message=FALSE, warning=FALSE}
+churn_by_internetService_plot <- churn %>%
+  group_by(InternetService) %>%
+  summarize(Churn_Rate = mean(Churn == "Yes")) %>%
+  ggplot(aes(x=InternetService, y=Churn_Rate)) + 
+  geom_col(fill="#66c2a5") + 
+  labs(title="Churn Rate by Internet Service", x="Internet Service", y="Churn Rate") +
+  theme_minimal()
+print(churn_by_internetService_plot)
+```
+
+## Most popular products by ranking
+To showcase the popularity of various products, we've evaluated `InternetService`, `OnlineSecurity`, `OnlineBackup`, `DeviceProtection`, `TechSupport`, `StreamingTV`, and `StreamingMovies.` We've condensed these product columns into a single column for simplified visualization-
+
+```{r product_plot, message=FALSE, warning=FALSE}
+product_data <- churn %>%
+  select(InternetService, OnlineSecurity, OnlineBackup, DeviceProtection, TechSupport, StreamingTV, StreamingMovies) %>%
+  gather(product, type) %>%
+  filter(!grepl("No internet service", type)) %>%
+  filter(type == "Yes")
+
+# Count occurrences of each product type
+product_count <- product_data %>%
+  group_by(product, type) %>%
+  count(type, sort=TRUE) %>%
+  arrange(desc(n)) %>%
+  ungroup() %>%
+  select(-type)
+
+## Plot the data
+product_plot <- ggplot(product_count, aes(x = reorder(product, -n), y = n, fill = product)) +
+  geom_bar(stat = "identity", width = 0.6) +  # Adjust the width here
+  labs(title = "Product Usage Count",
+       x = "Product",
+       y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set3")
+print(product_plot)
+```
+
+```{r, include=FALSE}
+ggsave("plots/PopularProducts_Ranking.png", product_plot)
+ggsave("plots/TotalCharges_Density_Plot.png", churn_non_churn_tot_charge)
+ggsave("plots/ChurnRate_by_InternetService.png", churn_by_internetService_plot)
+ggsave("plots/Churn_Distribution.png", churn_dist_plot)
+ggsave("plots/Tenure_Distribution.png", tenure_plot)
+ggsave("plots/MonthlyCharges_Distribution.png", monthlyCharges_plot)
+ggsave("plots/TotalCharges_Distribution.png", totalCharges_plot)
+```
+
+This tells us that the most popular products purchased by customers are *internet streaming services*, followed by *online backups*, *device protection* and *tech support*.
+
+### Data Manipulation
+
+After visualizing the data, we need to perform several manipulations to the data to ensure a precise analysis.
+
+- We convert the non-numeric columns into numeric factors.
+- It appears that `SeniorCitizen` should be encoded as a factor.
+
+```{r, echo=FALSE, include=TRUE}
+factor_columns <- c("gender","SeniorCitizen","Partner","Dependents", "PhoneService", "MultipleLines","InternetService","OnlineSecurity","OnlineBackup","DeviceProtection","TechSupport","StreamingTV","StreamingMovies","Contract","PaperlessBilling","PaymentMethod")
+
+numeric_columns <- c("tenure", "MonthlyCharges", "TotalCharges")
+
+# Get a list of non-numeric column names
+non_numeric_columns <- sapply(churn, function(col) !is.numeric(col))
+
+# Initialize a list to store the mappings
+value_mappings <- list()
+
+# Iterate over non-numeric columns
+for (col_name in (names(churn)[non_numeric_columns])[-1]) {
+  # Get the unique values in the column
+  unique_values <- unique(churn[[col_name]])
+  
+  # Create a mapping from unique values to numeric values
+  value_mapping <- setNames((seq_along(unique_values)-1), unique_values)
+  
+  # Update the column in the DataFrame with numeric values
+  churn[[col_name]] <- value_mapping[churn[[col_name]]]
+  
+  # Store the mapping for reference
+  value_mappings[[col_name]] <- value_mapping
+}
+
+# Convert columns in factor_columns to factors
+churn[factor_columns] <- lapply(churn[factor_columns], as.factor)
+
+# Convert columns in numeric_columns to numeric
+churn[numeric_columns] <- lapply(churn[numeric_columns], as.numeric)
+
+for (col_name in (names(churn)[non_numeric_columns])[-1]) {
+  cat("Column:", col_name, "\n")
+  print(value_mappings[[col_name]])
+  cat("\n")
+}
+write.csv(churn, "../data/WA_Fn-UseC_-Telco-Customer-Churn_clean.csv", row.names = FALSE)
+knitr::kable(head(churn))
+```
+
+## Market Basket Analysis to identify Products/Plans purchased together
+
+Market Basket Analysis provides insights into products that tend to be purchased together. This can show us patterns in purchasing behaviors and can be useful for marketing strategies like product bundling and recommendations. For this purpose, we use the **Apriori algorithm**.
+
+```{r transaction_data-plot, message=FALSE, warning=FALSE}
+transaction_data <- as(
+  churn %>% 
+  select(OnlineSecurity, OnlineBackup, DeviceProtection, TechSupport, StreamingTV, StreamingMovies), "transactions")
+rules <- apriori(transaction_data, parameter = list(supp = 0.01, conf = 0.1))
+inspect(head(sort(rules, by = "lift")))
+```
+
+### Interpretation of Market Basket Analysis Results:
+
+The rules are generated based on association rule mining. Each rule consists of an antecedent (lhs or left-hand side) and a consequent (rhs or right-hand side). The statistics provided (support, confidence, coverage, lift, and count) help in understanding the strength and relevance of these rules.
+
+#### Key Metrics:
+1. **Support**: Proportion of transactions in the dataset that contain the items in both lhs and rhs.
+2. **Confidence**: Probability of seeing the rhs given the lhs in a transaction.
+3. **Coverage**: Proportion of transactions that contain the items in lhs.
+4. **Lift**: Ratio of the observed support to what would be expected if lhs and rhs were independent. A lift value greater than 1 suggests a positive association between lhs and rhs.
+5. **Count**: Number of transactions that contain the items in both lhs and rhs.
+
+#### Analysis:
+
+1. **Rule 1**: Customers who do not have `OnlineBackup`, `DeviceProtection`, `TechSupport`, `StreamingTV`, and `StreamingMovies` are very likely (with confidence of 1 or 100%) to have `OnlineSecurity=Yes`. This association occurs in about 3.63% of the transactions (support) and is 2.39 times more frequent than if the services were purchased independently (lift).
+
+2. **Rule 2**: Customers who do not avail `OnlineSecurity`, `OnlineBackup`, `DeviceProtection`, `StreamingTV`, and `StreamingMovies` are extremely likely (with confidence of 1 or 100%) to opt for `TechSupport=Yes`. This pattern is observed in about 2.11% of the transactions.
+
+3. **Rule 3**: Customers lacking services like `OnlineSecurity`, `OnlineBackup`, `TechSupport`, `StreamingTV`, and `StreamingMovies` generally have `DeviceProtection=Yes` with full confidence. This association is found in approximately 2.57% of the transactions.
+
+4. **Rule 4**: For those without `OnlineSecurity`, `DeviceProtection`, `TechSupport`, `StreamingTV`, and `StreamingMovies`, there's a very strong indication (100% confidence) they have availed `OnlineBackup=Yes`. This occurs in roughly 4.33% of the transactions.
+
+5. **Rule 5**: Customers who have `OnlineSecurity=Yes` but do not utilize `OnlineBackup`, `DeviceProtection`, `TechSupport`, and `StreamingTV` are likely (82.94% confidence) to not use `StreamingMovies`. This combination appears in around 3.63% of the total transactions.
+
+6. **Rule 6**: Those with `OnlineSecurity=Yes`, and who do not have `OnlineBackup`, `DeviceProtection`, `TechSupport`, and `StreamingMovies`, are probably (81.78% confidence) not using `StreamingTV`. This pattern is seen in about 3.63% of the transactions.
+
+### Insights:
+
+- A common theme in most of these rules is that customers who refrain from using a range of services are very likely to use specific ones. This indicates the presence of **specific user segments** having precise requirements or preferences.
+  
+- High-confidence rules, like the first four, are especially valuable for targeted marketing or product recommendations since the patterns are very consistent.
+
+- The lift values, which are greater than 1 for all the rules, suggest that the associations are not just random occurrences but have significant patterns in the dataset.
+
+## Recommender System
+
+The Apriori algorithm for association rule mining is a popular choice for building a recommender systems, but since we only have access to the demographics of the customer, ie gender, age range, partnership status, and dependents, without the information about other products purchased, the Apriori algorithm might not be the best choice. Since we saw in the earlier section that there is a presence of specific user segments having precise requirements or preferences, using only demographics as predictors for all other features is extremely unlikely to succeed, hence we decide to skip this.
+
+## Cluster Analysis
+
+By leveraging cluster analysis, we can segment our customers into distinct groups based on their purchasing behaviors and preferences. These clusters can then be used to tailor marketing strategies, design custom offers, or even predict future behaviors.
+
+For this analysis, we'll start by preparing our data which involves **scaling** and **normalizing** the relevant features since generally clustering algorithms are sensitive to the scale of the data.
+
+To decide on the appropriate number of clusters, we'll employ the **elbow method** where we visualize the total within-cluster sum of squares against a range of potential cluster counts. An *elbow* in the curve often reveals the most suitable number of clusters, representing a point of diminishing returns where increasing the number of clusters doesn't provide much better fit to the data.
+
+```{r}
+churn_scaled <- churn %>%
+  select(PhoneService, MultipleLines, InternetService, OnlineSecurity,
+         OnlineBackup, DeviceProtection, TechSupport, StreamingTV,
+         StreamingMovies, Contract, PaperlessBilling, PaymentMethod,
+         MonthlyCharges, TotalCharges) %>%
+  mutate(across(where(is.numeric), scale))
+
+set.seed(123)
+# To decide on the number of clusters
+wss <- sapply(1:15, function(k){
+  kmeans(churn_scaled, centers=k)$tot.withinss
+})
+
+plot(1:15, wss, type="b", pch=19, frame=FALSE, 
+     xlab="Number of clusters K", ylab="Total within-clusters sum of squares")
+```
+
+Having identified that $K=5$ is the optimal number of clusters, we'll now proceed to actually cluster our scaled data using the **K-medoids algorithm**.
+
+Setting a seed ensures that our results are reproducible. This is especially crucial in iterative algorithms like K-medoids where the starting points can influence the final cluster assignments.
+
+```{r}
+set.seed(123)  # To reproduce results
+kmedoids_result <- pam(churn_scaled, k=5)
+
+# Assign clusters to data
+churn_scaled$clusters <- kmedoids_result$clustering
+```
+
+Utilizing K-medoids clustering, we calculate the distance of every data point to its cluster's medoid. By setting a threshold at the $90$'th percentile of these distances, we identify the outliers in our data. Points surpassing this threshold are deemed outliers for that particular cluster.
+
+```{r}
+library(purrr)
+
+# Function to compute distance from a data point to its medoid
+compute_distance_to_medoid <- function(row, cluster) {
+  as.numeric(dist(rbind(row, kmedoids_result$medoids[cluster,])))
+}
+
+# Compute distances
+churn_scaled$distance_to_medoid <- map2_dbl(
+  1:nrow(churn_scaled), churn_scaled$clusters,
+  ~ compute_distance_to_medoid(churn_scaled[.x, -c((ncol(churn_scaled)-1):ncol(churn_scaled))], .y))
+
+cluster_thresholds <- churn_scaled %>%
+  group_by(clusters) %>%
+  summarise(threshold = quantile(distance_to_medoid, 0.90))
+
+churn_scaled <- left_join(churn_scaled, cluster_thresholds, by = "clusters")
+churn_scaled$outlier <- ifelse(churn_scaled$distance_to_medoid > churn_scaled$threshold, 1, 0)
+
+# Filter outliers
+outliers <- churn_scaled %>% 
+  filter(outlier == 1)
+cat("Total Number of Outliers: ", nrow(outliers))
+```
+
+Using UMAP (explained later), a dimensionality reduction technique, we visually project our clusters onto a 2D space. This visualization displays each data point according to its assigned cluster, and outliers are distinctly highlighted, providing an immediate overview of cluster distribution and anomalies.
+
+```{r}
+library(umap)
+library(ggplot2)
+
+# Apply UMAP
+umap_results <- umap(churn_scaled %>% model.matrix(~.-1, .))
+
+# Combine UMAP results with cluster assignments
+umap_df <- data.frame(UMAP1 = umap_results$layout[,1], 
+                      UMAP2 = umap_results$layout[,2],
+                      cluster = as.factor(churn_scaled$cluster))
+
+umap_df$outlier <- churn_scaled$outlier
+
+# Plot using ggplot2
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = cluster, shape = as.factor(outlier))) +
+  geom_point(alpha = 0.7) +
+  scale_shape_manual(values = c(16, 3), name = "Outlier", labels = c("No", "Yes")) +
+  scale_color_manual(values = c("red", "yellow", "green", "blue", "black")) +
+  labs(title = "UMAP Projection with K-medoids Clusters", 
+       color = "Cluster") +
+  theme_minimal()
+```
+
+We can clearly see the outliers in the dataset, however the clusters formed are not clearly separable, but still do offer some visualization for the data.
+
+## Correlation Analysis
+
+```{r}
+# Load necessary libraries
+library(GGally)
+library(vcd)
+
+# Assuming the dataframe is named churn
+
+# Numeric correlation
+numeric_columns <- churn[, c("tenure", "MonthlyCharges", "TotalCharges")]
+numeric_correlation <- cor(numeric_columns)
+print("Numeric correlations:")
+print(numeric_correlation)
+
+# Function to compute point-biserial correlation
+point_biserial <- function(factor_var, numeric_var) {
+  cor.test(as.numeric(factor_var), numeric_var, method = "pearson")$estimate
+}
+
+factor_cols <- c("gender", "SeniorCitizen", "Partner", "Dependents", "PhoneService", "MultipleLines", "InternetService", "OnlineSecurity", "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV", "StreamingMovies", "Contract", "PaperlessBilling", "PaymentMethod", "Churn")
+numeric_cols <- c("tenure", "MonthlyCharges", "TotalCharges")
+
+# Categorical vs Numeric correlation
+for(f in factor_cols) {
+  for(n in numeric_cols) {
+    correlation <- point_biserial(churn[[f]], churn[[n]])
+    if(abs(correlation)>0.5){
+      cat(sprintf("Correlation between %s and %s: %f\n", f, n, correlation))
+    }
+  }
+}
+
+# Function to compute Cramér's V
+cramers_v <- function(var1, var2) {
+  tbl <- table(var1, var2)
+  assocstats(tbl)$cramer
+}
+
+# Categorical vs Categorical correlation
+for(i in 1:(length(factor_cols) - 1)) {
+  for(j in (i + 1):length(factor_cols)) {
+    correlation <- cramers_v(churn[[factor_cols[i]]], churn[[factor_cols[j]]])
+    if(abs(correlation)>0.7){
+      cat(sprintf("Cramér's V between %s and %s: %f\n", factor_cols[i], factor_cols[j], correlation))
+    }
+  }
+}
+```
+
+### **1. Numeric Correlations:**
+
+The correlation coefficients between the numeric variables are as follows:
+
+- **tenure and MonthlyCharges**: 0.2479 - This shows a weak positive correlation.
+- **tenure and TotalCharges**: 0.8262 - This indicates a strong positive correlation. As the tenure increases, the TotalCharges tend to increase significantly.
+- **MonthlyCharges and TotalCharges**: 0.6512 - This shows a moderately strong positive correlation. As monthly charges increase, the total charges tend to rise.
+
+### **2. Point-Biserial Correlation (Numeric vs. Categorical):**
+
+For correlation between numeric and categorical (factor) variables, we use point-biserial correlation.The strong correlations (greater than 0.5 in absolute value) are:
+
+- **OnlineSecurity and MonthlyCharges**: -0.6212 - Indicates a moderate negative correlation.
+- **OnlineBackup and MonthlyCharges**: -0.7105 - Suggests that customers with online backups are likely to have lower monthly charges.
+- **OnlineBackup and TotalCharges**: -0.5372 - Indicates a moderate negative correlation.
+- **DeviceProtection and MonthlyCharges**: -0.5134 - Shows a moderate negative relationship.
+- **TechSupport and MonthlyCharges**: -0.5976 - Customers with tech support are likely to have lower monthly charges.
+- **Contract and tenure**: 0.6716 - A strong positive correlation, indicating customers with longer contracts tend to have longer tenure.
+
+### **3. Cramér's V Correlation (Categorical vs. Categorical):**
+
+Cramér's V is a statistic for measuring the strength of association among categorical variables. The following pairs have strong correlations (greater than 0.7):
+
+- **PhoneService and MultipleLines**: 1.0 - This suggests a direct relationship. Customers with phone service tend to have multiple lines.
+- **InternetService** showed strong correlations with many other services, including:
+  - **OnlineSecurity**: 0.7245
+  - **OnlineBackup**: 0.7072
+  - **DeviceProtection**: 0.7071
+  - **TechSupport**: 0.7229
+  - **StreamingTV**: 0.7171
+  - **StreamingMovies**: 0.7160
+  This indicates that customers with internet services often opt for several other associated services, which is intuitive.
+  
+- **OnlineSecurity** also had strong associations with:
+  - **OnlineBackup**: 0.7184
+  - **DeviceProtection**: 0.7173
+  - **TechSupport**: 0.7331
+  - **StreamingTV**: 0.7078
+  - **StreamingMovies**: 0.7082
+  
+- **OnlineBackup** correlated with:
+  - **DeviceProtection**: 0.7191
+  - **TechSupport**: 0.7198
+  - **StreamingTV**: 0.7147
+  - **StreamingMovies**: 0.7137
+  
+- **DeviceProtection** was related to:
+  - **TechSupport**: 0.7265
+  - **StreamingTV**: 0.7337
+  - **StreamingMovies**: 0.7360
+
+- **TechSupport** had associations with:
+  - **StreamingTV**: 0.7163
+  - **StreamingMovies**: 0.7163
+
+- **StreamingTV and StreamingMovies**: 0.7710 - This suggests that customers who stream TV are also likely to stream movies.
+
+### **Summary:**
+
+1. **Tenure** is a significant driver of total charges, as seen from its strong correlation with the `TotalCharges` column.
+  
+2. There are specific internet-related services (like `OnlineBackup`, `OnlineSecurity`, `DeviceProtection`, and `TechSupport`) that are negatively correlated with monthly charges, indicating bundled or discounted plans.
+
+3. The high degree of inter-correlation among internet-related services suggests that customers often opt for multiple services together.
+
+4. Customers who stream TV are very likely to stream movies, indicating an overlap in the customer base for these two services.
+
+This analysis provides insights into customer behavior and preferences, which can be invaluable for targeted marketing and tailoring service offerings.
+
+## Dimensionality Reduction
+
+Dimensionality reduction is a technique used to reduce the number of features in a dataset while retaining as much information as possible. 
+
+### PCA (Principal Component Analysis) & SVD (Singular Value Decomposition)
+
+PCA is a method for dimensionality reduction by identifying axes, or principal components, that maximize dataset variance:
+
+1. **Orthogonal Transformation**: PCA derives linearly independent features called principal components.
+2. **Variance Maximization**: The first component captures the most variance, the second captures the next most, and so on.
+3. **Eigen Basics**: Principal components come from the dataset's covariance matrix eigenvectors. The eigenvalues signify variance captured by each component.
+
+For centered data, PCA is like performing SVD on \( A \)'s covariance matrix. Thus, PCA's principal components align with SVD's singular vectors, and PCA's eigenvalues square to SVD's singular values.
+
+SVD decomposes a matrix \( A \) into \( U \), \( \Sigma \), and \( V^T \):
+
+\[ A = U \Sigma V^T \]
+
+Where:
+- \( U \): "left singular vectors".
+- \( \Sigma \): diagonal matrix with decreasing "singular values".
+- \( V^T \): "right singular vectors".
+
+In data analysis:
+- Columns of \( U \) show patterns in \( A \)'s rows.
+- Columns of \( V \) indicate patterns in \( A \)'s columns.
+- \( \Sigma \)'s singular values denote pattern significance.
+
+```{r pca}
+churn_processed <- churn %>%
+  select(-customerID) %>% # Remove ID since it's unique and not useful for clustering
+  mutate_at(vars(tenure, MonthlyCharges, TotalCharges), scale) %>% # Standardizing
+  model.matrix(~.-1, .) # One-hot encoding
+
+library(stats)
+library(plotly)
+library(ggfortify)
+
+# Applying PCA
+pca_result <- prcomp(churn_processed, center = TRUE, scale. = TRUE)
+
+# Extract variance explained by each principal component
+explained_var <- pca_result$sdev^2
+explained_var_ratio <- explained_var / sum(explained_var)
+
+# Now, plot the biplot:
+autoplot(pca_result, 
+         data = churn_processed, 
+         loadings = TRUE, 
+         loadings.label = TRUE, 
+         loadings.label.size = 2,
+         label = FALSE,
+         scale = 0,
+         alpha = 0.3) +
+  theme_minimal() +
+  labs(title = "PCA Biplot",
+       x = paste("PC1:", round(explained_var_ratio[1]*100, 2), "% variance"),
+       y = paste("PC2:", round(explained_var_ratio[2]*100, 2), "% variance")) +
+  theme(legend.position = "right")
+```
+
+The biplot shows arrows representing the original variables in the data. The length of an arrow indicates the strength of a variable with respect to the principal components. The angle between arrows reflects the correlation between variables; a small angle means the variables are positively correlated, while a 180-degree angle means they are negatively correlated.
+
+In the above plot, it is interesting to observe that `Contract`, `Dependents` and `tenure` are highly correlated which might hint that customers with dependants are likely to opt for a contract and stay longer. It also tells us that the first and the second principal component explain $31\%$ and $12\%$ variance of the data.
+
+```{r}
+# Data frame for explained variance
+explained_df <- data.frame(component = 1:length(explained_var_ratio), 
+                           variance = explained_var_ratio)
+
+# ggplot2 Scree plot
+ggplot(explained_df, aes(x = component, y = variance)) +
+  geom_line(color = "red") +
+  geom_point(color = "red", size = 3) +
+  labs(title = "Scree Plot",
+       x = "Principal Component", 
+       y = "Proportion of Variance Explained") +
+  theme_minimal()
+```
+
+The Scree Plot displays the variance explained by each principal component and clearly shows that most of the variance is explained by the first $k=3$ principal components. Hence for visualization, we only consider these principal components.
+
+```{r}
+# Extracting the first three principal components for 3D visualization
+df_pca <- as.data.frame(pca_result$x[,1:3]) %>%
+  mutate(churn = churn$Churn)
+
+# 3D visualization using plotly
+plot_ly(df_pca, x = ~PC1, y = ~PC2, z = ~PC3, color = ~churn, 
+        type = "scatter3d", mode = "markers", marker = list(size = 3)) %>%
+  layout(title = "3D PCA visualization of churn data")
+```
+
+The 3D plot is insightful, highlighting two distinct linearly separable subgroups in the data. Within these subgroups, specific boundary regions indicate areas where customer churn can be anticipated.
+
+### t-SNE (t-Distributed Stochastic Neighbor Embedding):
+
+t-SNE (t-Distributed Stochastic Neighbor Embedding) is a dimensionality reduction method used mainly for visualization of high-dimensional data. Retains local structures, meaning nearby instances in the original space remain close in the reduced space. Unlike PCA, t-SNE better handles the crowding of points, but can get trapped in local minima because its cost function is non-convex.
+
+Here's a brief about t-SNE: 
+- In the high-dimensional space, t-SNE calculates pairwise similarities using a Gaussian distribution.
+- In the low-dimensional space, it models similarity using a t-distribution.
+- It then minimizes the divergence between the two distributions using gradient descent.
+
+```{r t-sne, message=FALSE, warning=FALSE}
+library(Rtsne)
+tsne_result <- Rtsne(churn_processed, dims = 2, perplexity = 30, check_duplicates = FALSE)
+
+# Visualization
+df_tsne <- as.data.frame(tsne_result$Y) %>% 
+  mutate(churn = churn$Churn)
+
+ggplot(df_tsne, aes(x = V1, y = V2, color = churn)) + 
+  geom_point(alpha = 0.5) +
+  labs(title = "t-SNE visualization of churn data", 
+       x = "Dimension 1", 
+       y = "Dimension 2") +
+  theme_minimal()
+
+```
+
+The plot reveals several distinct subgroups. Similar to previous observations, the embeddings indicate specific boundary regions where customer churn predictions are feasible.
+
+```{r}
+
+# Apply t-SNE for 3 dimensions
+tsne_result_3D <- Rtsne(churn_processed, dims = 3, perplexity = 30, check_duplicates = FALSE)
+
+# Convert to a dataframe for visualization
+df_tsne_3D <- as.data.frame(tsne_result_3D$Y) %>% 
+  mutate(churn = churn$Churn)
+
+# Visualize using plotly
+plot_ly(df_tsne_3D, x = ~V1, y = ~V2, z = ~V3,
+        color = ~churn, 
+        type = "scatter3d", 
+        mode = "markers",
+        marker = list(size = 2, opacity = 0.6)
+) %>%
+  layout(title = "3D t-SNE visualization of churn data")
+```
+
+This 3D t-SNE visualization again shows us quite a few sub groups and once again the embeddings have specific boundary regions with customer churn.
+
+### UMAP (Uniform Manifold Approximation and Projection)
+
+UMAP (Uniform Manifold Approximation and Projection) is another dimensionality reduction technique, akin to t-SNE but often faster and more scalable. The algorithm is based on the idea of approximating the geometric structure in high-dimensional space and mapping it into a lower-dimensional space. UMAP maintains both the local and more of the global data structure compared to t-SNE.
+
+Here's a brief about UMAP:
+
+- **Construct a Fuzzy Topological Representation**: UMAP begins by constructing a high-dimensional graph representation of the data. For each point, it identifies its neighboring points (typically using the nearest neighbors algorithm). Instead of creating a strict "k-nearest neighbors" graph, UMAP constructs a fuzzy simplicial set: points are interconnected with different strengths, representing how "close" they are in terms of the local metric.
+
+- **Optimize a Low-Dimensional Representation**: UMAP then optimizes a low-dimensional representation of this high-dimensional graph. This is done by minimizing the cross-entropy between the high-dimensional and low-dimensional representations. This step is similar to t-SNE in the sense of trying to maintain the local and global structure, but it uses a different approach to achieve this.
+
+```{r, message=FALSE, warning=FALSE}
+umap_result <- umap(churn_processed, n_components = 2)
+
+# Visualization
+df_umap <- as.data.frame(umap_result$layout) %>% 
+  mutate(churn = churn$Churn)
+
+# Visualization
+ggplot(df_umap, aes(x = V1, y = V2, color = churn)) + 
+  geom_point(alpha = 0.5) +
+  labs(title = "UMAP visualization of churn data", 
+       x = "Dimension 1", 
+       y = "Dimension 2") +
+  theme_minimal()
+
+umap_result_3d <- umap(churn_processed, n_components = 3)
+
+df_umap_3d <- as.data.frame(umap_result_3d$layout) %>% 
+  mutate(churn = churn$Churn)
+
+# Create the 3D plot
+plot_ly(df_umap_3d, x = ~V1, y = ~V2, z = ~V3, color = ~churn, 
+        type = "scatter3d", mode = "markers", marker = list(size = 3)) %>%
+  layout(title = "3D UMAP visualization of churn data")
+```
+
+This is a very informative visualization which tells us that there are two linearly separable groups and in each of these groups, there are $3$ and $5$ clusters present respectively. This also hints that the visualization of the PCA done above might collapse each of these clusters into the two linearly separable groups.
+
+## Churn Prediction
+
+For reliable model performance, we divide our dataset into training and testing splits with a ratio of $70-30$ which ensures sufficient training data while allowing for a robust model evaluation.
+
+```{r train-test-split}
+# Perform the train-test split (e.g., 70% training and 30% testing)
+set.seed(123) # For reproducibility
+sample_index <- sample(nrow(churn), 0.7 * nrow(churn))
+train_data <- churn[sample_index, ]
+test_data <- churn[-sample_index, ]
+```
+
+### Choice of ML model
+
+Selecting an ML model isn't about chasing the one with the highest accuracy blindly. It's vital to align the model's strengths with the problem at hand, ensuring it can capture the underlying patterns and relationships in the data. For our churn prediction task, the *Random Forest* model emerges as a standout choice. Random Forest is an ensemble learning method that combines the predictive power of multiple decision trees, making it robust, accurate, and suitable for both numerical and categorical data, which aligns well with the features in our churn dataset. 
+
+```{r ml-model, warning=FALSE, message=FALSE}
+library(randomForest)
+# Define the predictor variables (features) and the target variable (Churn)
+predictor_columns <- c("gender", "SeniorCitizen", "Partner", "Dependents", 
+                       "tenure", "PhoneService", "MultipleLines", "InternetService", 
+                       "OnlineSecurity", "OnlineBackup", "DeviceProtection", "TechSupport", 
+                       "StreamingTV", "StreamingMovies", "Contract", "PaperlessBilling", 
+                       "PaymentMethod", "MonthlyCharges", "TotalCharges")
+
+target_column <- "Churn"
+
+# Train the Random Forest model
+rf_model <- randomForest(factor(Churn) ~ ., data = train_data[, c(predictor_columns, target_column)], ntree = 200)
+saveRDS(rf_model, "../models/ML_model/randomForest_model.rda")
+```
+
+### Model Validation
+
+#### Mean Decrease in Gini Score
+
+Mean Decrease in Gini Score is a metric that measures how each variable contributes to the homogeneity of nodes and leaves across the ensemble of decision trees. A higher 'Mean Decrease in Gini' score signifies a more substantial impact on reducing impurity and enhancing the model's ability to make accurate predictions. Notably, we observe that `TotalCharges`,`tenure`, `MonthlyCharges`, and `Contract` exhibit the highest values of Mean Decrease in Gini Score.
+
+```{r rf-model, warning=FALSE, message=FALSE}
+varImpPlot(rf_model, main = "Random Forest Feature Importance")
+```
+
+The plot highlights that the features `TotalCharges`, `tenure`, and `MonthlyCharges` emerge as the most influential. Notably, there's a pronounced drop in importance when moving to the feature `Contract`.
+
+#### Out-of-Bag (OOB) Error
+
+The Out-of-Bag (OOB) error is a method of measuring the prediction error of ensemble models, particularly Random Forests. Here's a brief overview:
+
+- When building trees in a Random Forest, each tree is trained on a subset of data obtained by bootstrapping (sampling with replacement).
+- Not all data points are used for training every tree. On average, each tree in a Random Forest uses about two-thirds of the observations.
+- The remaining one-third, not seen by a tree during its training, is termed "out-of-bag". 
+- The OOB error is computed by predicting the output for each data point using only the trees that did not see this point during training. 
+- It serves as an internal validation metric, often negating the need for a separate validation set.
+
+OOB error provides a handy estimate of the generalization error and helps gauge the model's performance without additional cross-validation.
+
+```{r oob, warning=FALSE, message=FALSE}
+oob_error <- rf_model$err.rate[nrow(rf_model$err.rate), "OOB"]
+cat("Out of Bag Error:", oob_error, "\n")
+```
+
+### Metrics
+
+Now that we have trained our random forest model (`rf_model`), we assess its performance on a separate held-out test set.
+
+```{r model-validation, warning=FALSE, message=FALSE}
+library(ROCR)
+# Make predictions on the test set
+predictions <- predict(rf_model, newdata = test_data[predictor_columns], type = "response")
+
+# Calculate accuracy
+accuracy <- mean(predictions == test_data$Churn)
+cat("Accuracy:", accuracy, "\n")
+
+# Calculate AUROC
+# Create a prediction object for ROC analysis
+prediction_obj <- prediction(as.numeric(predictions), test_data$Churn)
+
+# Calculate AUROC
+performance <- performance(prediction_obj, measure = "auc")
+auroc <- as.numeric(performance@y.values)
+cat("AUROC:", auroc, "\n")
+
+conf_matrix <- table(Actual = test_data$Churn, Predicted = predictions)
+precision <- conf_matrix[2, 2] / sum(conf_matrix[, 2])
+recall <- conf_matrix[2, 2] / sum(conf_matrix[2, ])
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1 Score:", f1_score, "\n")
+
+# Display confusion matrix
+print(conf_matrix)
+```
+
+### Model Evaluation and Interpretation
+
+Based on the random forest model, the results on the test set are as follows:
+
+1. **Accuracy**: The model's accuracy is approximately \(80.69\%\). This means that, out of all the predictions made by the model, around \(80.69\%\) were correct. It's a relatively high accuracy, suggesting that the model is doing well in generalizing to unseen data.
+
+2. **AUROC**: The AUROC value is about \(0.705\). The AUROC evaluates the model's ability to distinguish between the positive (churned) and negative (non-churned) classes. An AUROC score of \(0.705\) is considered moderate. While it's above the no-discrimination line of \(0.5\), there is room for improvement. It would be ideal for this score to be closer to \(1\), indicating perfect discrimination.
+
+3. **Precision**: The precision is approximately \(0.6304\), meaning that when the model predicts a customer will churn, it's correct about \(63.04\%\) of the time. 
+
+4. **Recall (or Sensitivity)**: The recall is around \(0.5058\), suggesting that the model successfully identifies \(50.58\%\) of all actual churn cases. This indicates that the model is missing out on predicting almost half of the customers who do churn.
+
+5. **F1 Score**: The F1 score, which is the harmonic mean of precision and recall, stands at approximately \(0.5613\). An F1 score closer to \(1\) is ideal, and this current value indicates that there is a balance between precision and recall, but there's potential for improvement.
+
+6. **Confusion Matrix**:
+
+From the confusion matrix:
+
+- True Negatives (TN): 1444 - Customers who were predicted not to churn and did not churn.
+
+- False Positives (FP): 153 - Customers who were predicted to churn but did not.
+
+- False Negatives (FN): 255 - Customers who were predicted not to churn but did churn.
+
+- True Positives (TP): 261 - Customers who were predicted to churn and actually did.
+
+Hence while the model exhibits a decent accuracy, some metrics like recall and AUROC suggest that there's potential for further optimization!
