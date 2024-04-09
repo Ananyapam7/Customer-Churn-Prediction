@@ -1,4 +1,4 @@
-# Customer Churn Prediction with Deep Learning - IIITD
+# Customer Churn Prediction with Deep Learning
 
 Predict customer churn using deep learning models. This repository houses the code and assets required to build a robust deep learning model to forecast customer churn based on a variety of demographic and account-specific factors.
 
